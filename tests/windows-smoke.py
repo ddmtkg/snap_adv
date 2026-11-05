@@ -1,0 +1,190 @@
+"""Exercise the installed release app on a disposable Windows CI desktop."""
+import ctypes
+import json
+import os
+from pathlib import Path
+import struct
+import subprocess
+import sys
+import time
+
+if sys.platform != 'win32' or os.environ.get('GITHUB_ACTIONS') != 'true':
+    raise SystemExit('Run this test only on a disposable Windows GitHub Actions runner.')
+
+user32 = ctypes.WinDLL("user32", use_last_error=True)
+user32.SetProcessDPIAware()
+user32.GetForegroundWindow.restype = ctypes.c_void_p
+user32.GetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+user32.SetCursorPos.restype = ctypes.c_int
+
+class MouseInput(ctypes.Structure):
+    _fields_ = [('dx', ctypes.c_long), ('dy', ctypes.c_long), ('mouseData', ctypes.c_ulong),
+                ('dwFlags', ctypes.c_ulong), ('time', ctypes.c_ulong), ('dwExtraInfo', ctypes.c_size_t)]
+
+class KeyboardInput(ctypes.Structure):
+    _fields_ = [('wVk', ctypes.c_ushort), ('wScan', ctypes.c_ushort), ('dwFlags', ctypes.c_ulong),
+                ('time', ctypes.c_ulong), ('dwExtraInfo', ctypes.c_size_t)]
+
+class InputUnion(ctypes.Union):
+    _fields_ = [('mi', MouseInput), ('ki', KeyboardInput)]
+
+class Input(ctypes.Structure):
+    _fields_ = [('type', ctypes.c_ulong), ('data', InputUnion)]
+
+user32.SendInput.argtypes = [ctypes.c_uint, ctypes.POINTER(Input), ctypes.c_int]
+user32.SendInput.restype = ctypes.c_uint
+
+
+def send_key(code, released=False):
+    event = Input(type=1, data=InputUnion(ki=KeyboardInput(
+        wVk=code, wScan=user32.MapVirtualKeyW(code, 0), dwFlags=2 if released else 0)))
+    if user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(event)) != 1:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+snap_dir = Path.home() / '.snap'
+inbox = snap_dir / 'inbox'
+log_path = snap_dir / 'snap.log'
+install_dir = Path(os.environ['RUNNER_TEMP']) / 'SnapSmoke'
+installer = next(Path('app/src-tauri/target/release/bundle/nsis').glob('*.exe'))
+
+
+def log():
+    return log_path.read_text(encoding='utf-8', errors='replace') if log_path.exists() else ''
+
+
+def wait_for(predicate, label, timeout=60):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.2)
+    diagnostics()
+    raise AssertionError(f'Timed out: {label}\n{log()}')
+
+
+def diagnostics():
+    """Capture the disposable CI desktop to diagnose native interaction failures."""
+    out = Path('smoke-diagnostics')
+    out.mkdir(exist_ok=True)
+    title = ctypes.create_unicode_buffer(512)
+    user32.GetWindowTextW(user32.GetForegroundWindow(), title, len(title))
+    print(f'Foreground window: {title.value}', flush=True)
+    subprocess.run(['powershell', '-NoProfile', '-Command', r"""
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$r = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+$b = New-Object System.Drawing.Bitmap($r.Width, $r.Height)
+$g = [System.Drawing.Graphics]::FromImage($b)
+$g.CopyFromScreen($r.Location, [System.Drawing.Point]::Empty, $r.Size)
+$b.Save((Join-Path (Get-Location) 'smoke-diagnostics/desktop.png'))
+$g.Dispose()
+$b.Dispose()
+"""], check=False, timeout=20)
+
+
+def keys(*codes):
+    for code in codes:
+        send_key(code)
+    time.sleep(0.1)
+    for code in reversed(codes):
+        send_key(code, released=True)
+    time.sleep(0.2)
+
+
+def click(x, y):
+    user32.SetCursorPos(x, y)
+    user32.mouse_event(2, 0, 0, 0, 0)
+    time.sleep(0.1)
+    user32.mouse_event(4, 0, 0, 0, 0)
+    time.sleep(0.2)
+
+
+def drag(x1, y1, x2, y2):
+    user32.SetCursorPos(x1, y1)
+    user32.mouse_event(2, 0, 0, 0, 0)
+    for i in range(1, 11):
+        user32.SetCursorPos(x1 + (x2-x1)*i//10, y1 + (y2-y1)*i//10)
+        time.sleep(0.03)
+    user32.mouse_event(4, 0, 0, 0, 0)
+    time.sleep(0.3)
+
+
+def capture():
+    count = log().count('first frame:')
+    keys(0x11, 0x10, 0x53)  # Ctrl+Shift+S
+    wait_for(lambda: log().count('first frame:') > count, 'overlay first frame')
+    time.sleep(0.5)
+
+
+def files():
+    return sorted(inbox.glob('snap-*.json'))
+
+
+def save():
+    count = len(files())
+    closed = log().count('overlay closed')
+    keys(0x0D)
+    wait_for(lambda: len(files()) == count + 1, 'saved annotation')
+    wait_for(lambda: log().count('overlay closed') > closed, 'overlay closed')
+    time.sleep(0.5)
+    path = files()[-1]
+    metadata = json.loads(path.read_text(encoding='utf-8'))
+    png = path.with_suffix('.png').read_bytes()
+    assert png[:8] == b'\x89PNG\r\n\x1a\n', 'Invalid PNG signature'
+    assert list(struct.unpack('>II', png[16:24])) == metadata['image_size']
+    assert metadata['source']['session_type'] == 'windows'
+    return metadata
+
+
+process = None
+try:
+    subprocess.run([str(installer.resolve()), '/S', f'/D={install_dir}'], check=True, timeout=120)
+    executable = install_dir / 'snap.exe'
+    assert executable.is_file(), f'Installer did not create {executable}'
+    print('PASS: NSIS installation', flush=True)
+    process = subprocess.Popen([str(executable)])
+    wait_for(lambda: 'snap ready' in log(), 'tray startup')
+    assert process.poll() is None, 'Tray process exited unexpectedly'
+    print('PASS: tray startup and hotkey registration', flush=True)
+
+    capture()
+    drag(100, 150, 600, 450)
+    keys(0x52)  # Rectangle
+    drag(180, 220, 320, 300)
+    keys(0x54)  # Text
+    click(200, 340)
+    for letter in 'SNAP TEST':
+        keys(ord(letter))
+    keys(0x0D)  # Commit text
+    metadata = save()
+    assert metadata['source']['crop'] is not None, metadata
+    assert {a['type'] for a in metadata['annotations']} == {'rect', 'text'}, metadata
+    assert any(a.get('content', '').lower() == 'snap test' for a in metadata['annotations'])
+    assert metadata['image_size'][0] < metadata['source']['capture_size'][0]
+    print('PASS: hotkey, capture, region crop, rectangle, text, PNG + JSON save', flush=True)
+
+    capture()
+    metadata = save()
+    assert metadata['source']['crop'] is None
+    assert metadata['annotations'] == []
+    assert metadata['image_size'] == metadata['source']['capture_size']
+    print('PASS: second capture and full-screen save from memory', flush=True)
+
+    capture()
+    count = len(files())
+    closed = log().count('overlay closed')
+    keys(0x1B)  # Escape
+    wait_for(lambda: log().count('overlay closed') > closed, 'cancel overlay')
+    assert len(files()) == count, 'Cancel unexpectedly saved a screenshot'
+    assert not (Path(os.environ['TEMP']) / 'snap-capture.png').exists()
+    print('PASS: cancel and no temporary full-screen PNG', flush=True)
+finally:
+    if process is not None and process.poll() is None:
+        process.terminate()
+        process.wait(timeout=15)
+    out = Path("smoke-diagnostics")
+    out.mkdir(exist_ok=True)
+    (out / "snap.log").write_text(log(), encoding="utf-8")
+    print(log(), flush=True)

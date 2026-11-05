@@ -259,7 +259,7 @@ function logTiming() {
   invoke("frontend_log", { msg: `timing: ${parts.join(" ")}` }).catch(() => {});
 }
 
-function showError(msg) {
+function showError(msg, closing = true) {
   const w = window.innerWidth;
   const h = window.innerHeight;
   ctx.fillStyle = "rgba(0,0,0,0.85)";
@@ -271,7 +271,7 @@ function showError(msg) {
   ctx.fillText(msg, w / 2, h / 2);
   ctx.font = "14px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
   ctx.fillStyle = "rgba(255,255,255,0.5)";
-  ctx.fillText("Closing in 3 seconds...", w / 2, h / 2 + 30);
+  ctx.fillText(closing ? "Closing in 3 seconds..." : "Press Esc to close and try again.", w / 2, h / 2 + 30);
 }
 
 function loadBackgroundImage(base64Data) {
@@ -559,6 +559,9 @@ canvas.addEventListener("mousedown", (e) => {
   }
 
   if (currentTool === "text") {
+    // The canvas's default mousedown focus action otherwise takes focus back
+    // after showTextInput focuses the field, leaving typing/Enter ineffective.
+    e.preventDefault();
     showTextInput(x, y);
     return;
   }
@@ -760,7 +763,9 @@ function showTextInput(x, y) {
 }
 
 textInput.addEventListener("keydown", (e) => {
+  if (textInput.style.display !== "block") return;
   if (e.key === "Enter") {
+    e.preventDefault();
     const content = textInput.value.trim();
     if (content) {
       annotations.push({
@@ -774,11 +779,13 @@ textInput.addEventListener("keydown", (e) => {
     }
     textInput.style.display = "none";
     textInput.value = "";
+    textInput.blur();
     render();
     e.stopPropagation();
   } else if (e.key === "Escape") {
     textInput.style.display = "none";
     textInput.value = "";
+    textInput.blur();
     e.stopPropagation();
   }
 });
@@ -960,6 +967,7 @@ async function closeOverlay() {
 }
 
 async function save() {
+  invoke("frontend_log", { msg: `save requested: annotations=${annotations.length}, cropped=${!!cropSrc}` }).catch(() => {});
   if (isSaving) return;
   // Nothing to save until a capture is loaded (e.g. Enter pressed while the
   // capture-failed message is showing).
@@ -1035,22 +1043,13 @@ async function save() {
       const dataUrl = exportCanvas.toDataURL("image/png");
       imageBase64 = dataUrl.split(",")[1];
     } catch (e) {
-      console.error("Canvas export failed, saving raw capture instead:", e);
-      // The raw capture is the uncropped screen, so re-express the sidecar in
-      // full-capture pixels (same scale, shifted by the crop origin).
-      const ox = cropSrc ? cropSrc.x : 0;
-      const oy = cropSrc ? cropSrc.y : 0;
-      const tRaw = {
-        ...t,
-        point: (x, y) => {
-          const [px, py] = t.point(x, y);
-          return [px + ox, py + oy];
-        },
-      };
-      metadata.image_size = [backgroundImage.naturalWidth, backgroundImage.naturalHeight];
-      metadata.source.crop = null;
-      metadata.annotations = annotations.map((a) => annotationToSidecar(a, tRaw));
-      metadata.export_warning = "annotation compositing failed; image is the raw capture";
+      // Never replace a selected crop with the private, full-screen capture.
+      console.error("Canvas export failed:", e);
+      invoke("frontend_log", { msg: `canvas export failed: ${e}` }).catch(() => {});
+      isSaving = false;
+      saveBtn.classList.remove("saving");
+      showError("Could not export the selected image. Nothing was saved.", false);
+      return;
     }
   }
 
@@ -1061,6 +1060,7 @@ async function save() {
     });
   } catch (e) {
     console.error("Save failed:", e);
+    invoke("frontend_log", { msg: `save failed: ${e}` }).catch(() => {});
     isSaving = false;
     saveBtn.classList.remove("saving");
     ctx.save();

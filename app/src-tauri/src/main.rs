@@ -136,7 +136,6 @@ fn run_overlay_mode() {
     snap_lib::start_precapture();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .invoke_handler(snap_lib::invoke_handler())
         .setup(|app| {
             let handle = app.handle().clone();
@@ -221,7 +220,6 @@ fn run_tray_mode() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_shell::init())
         .invoke_handler(snap_lib::invoke_handler())
         .on_window_event(|window, event| {
             // The frontend normally clears OVERLAY_ACTIVE via mark_overlay_closed,

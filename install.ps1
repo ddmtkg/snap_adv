@@ -2,13 +2,15 @@
 # Run from PowerShell: .\install.ps1
 [CmdletBinding()]
 param(
-    [switch] $SkipAppInstall
+    [switch] $SkipAppInstall,
+    [switch] $InstallMcp,
+    [switch] $EnableStartup
 )
 
 $ErrorActionPreference = 'Stop'
 # Windows PowerShell 5.1 downloads crawl with the progress bar on.
 $ProgressPreference = 'SilentlyContinue'
-$repo = 'adjective-rob/snap'
+$repo = 'ddmtkg/snap_adv'
 $installRoot = Join-Path $env:LOCALAPPDATA 'snap-annotate'
 $script:releaseTag = $null
 $mcpDirectory = Join-Path $installRoot 'mcp-server'
@@ -92,6 +94,17 @@ function Get-LatestRelease {
     }
 }
 
+function Assert-DownloadedAssetHash([string] $Path, [string] $Digest) {
+    if ($Digest -notmatch '^sha256:([0-9a-fA-F]{64})$') {
+        Stop-Install 'Missing valid release asset SHA-256 digest.'
+    }
+    $expected = $Matches[1].ToLowerInvariant()
+    $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $expected) {
+        Stop-Install "Installer checksum mismatch. Expected: $expected; actual: $actual"
+    }
+}
+
 function Install-LatestApp($release) {
     if ($null -eq $release) {
         Stop-Install "No published Snap release could be found at https://github.com/$repo/releases. The Windows installer is published with tagged releases."
@@ -107,6 +120,7 @@ function Install-LatestApp($release) {
     New-Item -ItemType Directory -Path $temporaryDirectory | Out-Null
     try {
         Invoke-WebRequest -Uri $assets[0].browser_download_url -OutFile $installerPath
+        Assert-DownloadedAssetHash $installerPath $assets[0].digest
         Write-Host "Running Snap installer from release $($release.tag_name). Complete its installer prompts to continue."
         $process = Start-Process -FilePath $installerPath -Wait -PassThru
         if ($process.ExitCode -ne 0) {
@@ -146,6 +160,11 @@ function Get-SnapExecutable {
 }
 
 function Start-SnapInstall {
+    $release = Get-LatestRelease
+    if (-not $SkipAppInstall) { Install-LatestApp $release }
+    $appPath = Get-SnapExecutable
+    if (-not $appPath) { Stop-Install 'Could not find snap.exe after installation.' }
+    if ($InstallMcp) {
     $git = Get-Command git -ErrorAction SilentlyContinue
     if ($null -eq $git) { Stop-Install 'Git is required to install or update Snap.' }
     $uv = Get-Command uv -ErrorAction SilentlyContinue
@@ -168,15 +187,8 @@ function Start-SnapInstall {
     }
 
     # Pin the checkout to the latest release so scripts and app match; main when there is none.
-    $release = Get-LatestRelease
     if ($null -ne $release) { $script:releaseTag = $release.tag_name }
     $ref = if ($script:releaseTag) { "refs/tags/$script:releaseTag" } else { 'main' }
-
-    if (-not $SkipAppInstall) {
-        Install-LatestApp $release
-    }
-    $appPath = Get-SnapExecutable
-    if (-not $appPath) { Stop-Install 'Could not find snap.exe after installation. Check the installer location and rerun this script.' }
 
     if (Test-Path -LiteralPath (Join-Path $installRoot '.git')) {
         Invoke-Checked 'git' @('-C', $installRoot, 'fetch', '--depth', '1', 'origin', $ref)
@@ -213,6 +225,8 @@ function Start-SnapInstall {
     Merge-SnapServer (Join-Path $env:USERPROFILE '.cursor\mcp.json')
     Merge-SnapServer (Join-Path $env:USERPROFILE '.codeium\windsurf\mcp_config.json')
 
+    }
+    if ($EnableStartup) {
     $startupDirectory = [Environment]::GetFolderPath('Startup')
     $shortcutPath = Join-Path $startupDirectory 'Snap.lnk'
     $shell = New-Object -ComObject WScript.Shell
@@ -221,6 +235,7 @@ function Start-SnapInstall {
     $shortcut.WorkingDirectory = Split-Path -Parent $appPath
     $shortcut.Save()
     Write-Host "Snap will start when you sign in ($shortcutPath)."
+    }
 
     Write-Host 'Snap setup is complete. Press Ctrl+Shift+S to capture an annotation.'
 }

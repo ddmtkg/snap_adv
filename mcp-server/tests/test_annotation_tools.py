@@ -5,11 +5,11 @@ import asyncio
 import base64
 import importlib
 import json
-import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastmcp import Client
 
@@ -26,18 +26,12 @@ class AnnotationToolTests(unittest.TestCase):
         self.older = self._write("snap-20990101-000000-000", self.png_bytes)
         self.newer = self._write("snap-20990102-000000-000", self.png_bytes)
 
-        self.old_home = os.environ.get("HOME")
-        os.environ["HOME"] = str(self.home)
-
-        if "server" in sys.modules:
-            del sys.modules["server"]
-        self.server = importlib.import_module("server")
-
-    def tearDown(self):
-        if self.old_home is None:
-            os.environ.pop("HOME", None)
-        else:
-            os.environ["HOME"] = self.old_home
+        # Path.home uses USERPROFILE on Windows, not HOME. Patch the API so
+        # every platform reads/writes only the isolated test directory.
+        with patch.object(Path, "home", return_value=self.home):
+            if "server" in sys.modules:
+                del sys.modules["server"]
+            self.server = importlib.import_module("server")
 
     def _write(self, stem: str, png: bytes | None) -> Path:
         base = self.inbox / stem
@@ -122,6 +116,24 @@ class AnnotationToolTests(unittest.TestCase):
         result = self._call("get_annotation", filename="snap-nope")
         self.assertIn("error", result.structured_content)
 
+    def test_unicode_comment(self):
+        comment = "Проверить размер — замечание №1"
+        self.newer.with_suffix(".json").write_text(
+            json.dumps({"annotations": [{"type": "text", "content": comment}]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        result = self._call("get_latest_annotation")
+        self.assertEqual(self._text_json(result)["annotations"][0]["content"], comment)
+
+    def test_malformed_metadata_does_not_break_inbox(self):
+        for invalid in (b"[]", b"null", b"{broken", b"\xff"):
+            self.newer.with_suffix(".json").write_bytes(invalid)
+            result = self._call("list_annotations")
+            data = self._text_json(result)
+            self.assertEqual(data["count"], 2)
+            self.assertIn("error", data["annotations"][0])
+            self.assertEqual(data["annotations"][1]["filename"], self.older.name)
+
     def test_get_annotation_rejects_paths_outside_inbox(self):
         outside = self.home / "secret"
         outside.with_suffix(".json").write_text(json.dumps({"annotations": []}))
@@ -130,6 +142,33 @@ class AnnotationToolTests(unittest.TestCase):
             result = self._call("get_annotation", filename=name)
             self.assertIn("error", result.structured_content)
             self.assertEqual(self._images(result), [])
+    def test_block_symlinks_outside_inbox(self):
+        target = self.home / "private.json"
+        target.write_text(json.dumps({"secret": "sensitive"}))
+        link = self.inbox / "snap-20990104-000000-000.json"
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("Symlinks unavailable")
+        self.assertIn("error", self._call("get_annotation", filename=link.stem).structured_content)
+        self.assertEqual(self._text_json(self._call("list_annotations"))["count"], 2)
+
+    def test_block_symlinked_image(self):
+        target = self.home / "private.png"
+        target.write_bytes(self.png_bytes)
+        name = "snap-20990104-000000-000"
+        (self.inbox / (name + ".json")).write_text('{"annotations":[]}')
+        try:
+            (self.inbox / (name + ".png")).symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("Symlinks unavailable")
+        result = self._call("get_annotation", filename=name)
+        self.assertEqual(self._images(result), [])
+        self.assertIsNone(self._text_json(result)["image_path"])
+
+    def test_invalid_annotation_names(self):
+        for name in ["../../secret", "snap-../private", "snap-foo/bar", "snap-", ".last_read"]:
+            self.assertIn("error", self._call("get_annotation", filename=name).structured_content)
 
 
 if __name__ == "__main__":
