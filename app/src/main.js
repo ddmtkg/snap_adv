@@ -559,6 +559,9 @@ canvas.addEventListener("mousedown", (e) => {
   }
 
   if (currentTool === "text") {
+    // The canvas's default mousedown focus action otherwise takes focus back
+    // after showTextInput focuses the field, leaving typing/Enter ineffective.
+    e.preventDefault();
     showTextInput(x, y);
     return;
   }
