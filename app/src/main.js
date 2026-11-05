@@ -1035,22 +1035,12 @@ async function save() {
       const dataUrl = exportCanvas.toDataURL("image/png");
       imageBase64 = dataUrl.split(",")[1];
     } catch (e) {
-      console.error("Canvas export failed, saving raw capture instead:", e);
-      // The raw capture is the uncropped screen, so re-express the sidecar in
-      // full-capture pixels (same scale, shifted by the crop origin).
-      const ox = cropSrc ? cropSrc.x : 0;
-      const oy = cropSrc ? cropSrc.y : 0;
-      const tRaw = {
-        ...t,
-        point: (x, y) => {
-          const [px, py] = t.point(x, y);
-          return [px + ox, py + oy];
-        },
-      };
-      metadata.image_size = [backgroundImage.naturalWidth, backgroundImage.naturalHeight];
-      metadata.source.crop = null;
-      metadata.annotations = annotations.map((a) => annotationToSidecar(a, tRaw));
-      metadata.export_warning = "annotation compositing failed; image is the raw capture";
+      // Never replace a selected crop with the private, full-screen capture.
+      console.error("Canvas export failed:", e);
+      isSaving = false;
+      saveBtn.classList.remove("saving");
+      showError("Could not export the selected image. Nothing was saved. Press Esc to retry.");
+      return;
     }
   }
 

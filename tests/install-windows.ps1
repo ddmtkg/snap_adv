@@ -45,6 +45,16 @@ try {
     Assert-True $threw 'An invalid mcpServers value was not rejected.'
     Assert-True ((Get-Content -LiteralPath $wrongTypePath -Raw) -eq $wrongType) 'An invalid mcpServers value was overwritten.'
 
+    $assetPath = Join-Path $testDirectory 'asset.exe'
+    [System.IO.File]::WriteAllBytes($assetPath, [byte[]](1, 2, 3, 4))
+    $digest = 'sha256:' + (Get-FileHash -LiteralPath $assetPath -Algorithm SHA256).Hash
+    Assert-DownloadedAssetHash $assetPath $digest
+    foreach ($badDigest in @('', 'md5:123', ('sha256:' + ('0' * 64)))) {
+        $threw = $false
+        try { Assert-DownloadedAssetHash $assetPath $badDigest } catch { $threw = $true }
+        Assert-True $threw 'An invalid or mismatched installer digest was accepted.'
+    }
+
     Write-Host 'Windows install configuration checks passed.'
 }
 finally {
