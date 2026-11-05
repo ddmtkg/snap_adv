@@ -150,6 +150,10 @@ function Get-SnapExecutable {
 }
 
 function Start-SnapInstall {
+    $release = Get-LatestRelease
+    if (-not $SkipAppInstall) { Install-LatestApp $release }
+    $appPath = Get-SnapExecutable
+    if (-not $appPath) { Stop-Install 'Could not find snap.exe after installation.' }
     if ($InstallMcp) {
     $git = Get-Command git -ErrorAction SilentlyContinue
     if ($null -eq $git) { Stop-Install 'Git is required to install or update Snap.' }
@@ -173,15 +177,8 @@ function Start-SnapInstall {
     }
 
     # Pin the checkout to the latest release so scripts and app match; main when there is none.
-    $release = Get-LatestRelease
     if ($null -ne $release) { $script:releaseTag = $release.tag_name }
     $ref = if ($script:releaseTag) { "refs/tags/$script:releaseTag" } else { 'main' }
-
-    if (-not $SkipAppInstall) {
-        Install-LatestApp $release
-    }
-    $appPath = Get-SnapExecutable
-    if (-not $appPath) { Stop-Install 'Could not find snap.exe after installation. Check the installer location and rerun this script.' }
 
     if (Test-Path -LiteralPath (Join-Path $installRoot '.git')) {
         Invoke-Checked 'git' @('-C', $installRoot, 'fetch', '--depth', '1', 'origin', $ref)
