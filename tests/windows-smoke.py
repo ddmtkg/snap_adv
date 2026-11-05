@@ -13,10 +13,38 @@ import urllib.request
 if sys.platform != 'win32' or os.environ.get('GITHUB_ACTIONS') != 'true':
     raise SystemExit('Run this test only on a disposable Windows GitHub Actions runner.')
 
-user32 = ctypes.windll.user32
+user32 = ctypes.WinDLL("user32", use_last_error=True)
 user32.SetProcessDPIAware()
 user32.GetForegroundWindow.restype = ctypes.c_void_p
 user32.GetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+user32.SetCursorPos.restype = ctypes.c_int
+
+class MouseInput(ctypes.Structure):
+    _fields_ = [('dx', ctypes.c_long), ('dy', ctypes.c_long), ('mouseData', ctypes.c_ulong),
+                ('dwFlags', ctypes.c_ulong), ('time', ctypes.c_ulong), ('dwExtraInfo', ctypes.c_size_t)]
+
+class KeyboardInput(ctypes.Structure):
+    _fields_ = [('wVk', ctypes.c_ushort), ('wScan', ctypes.c_ushort), ('dwFlags', ctypes.c_ulong),
+                ('time', ctypes.c_ulong), ('dwExtraInfo', ctypes.c_size_t)]
+
+class InputUnion(ctypes.Union):
+    _fields_ = [('mi', MouseInput), ('ki', KeyboardInput)]
+
+class Input(ctypes.Structure):
+    _fields_ = [('type', ctypes.c_ulong), ('data', InputUnion)]
+
+user32.SendInput.argtypes = [ctypes.c_uint, ctypes.POINTER(Input), ctypes.c_int]
+user32.SendInput.restype = ctypes.c_uint
+
+
+def send_key(code, released=False):
+    event = Input(type=1, data=InputUnion(ki=KeyboardInput(
+        wVk=code, wScan=user32.MapVirtualKeyW(code, 0), dwFlags=2 if released else 0)))
+    if user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(event)) != 1:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
 snap_dir = Path.home() / '.snap'
 inbox = snap_dir / 'inbox'
 log_path = snap_dir / 'snap.log'
@@ -45,6 +73,17 @@ def diagnostics():
     title = ctypes.create_unicode_buffer(512)
     user32.GetWindowTextW(user32.GetForegroundWindow(), title, len(title))
     print(f'Foreground window: {title.value}', flush=True)
+    subprocess.run(['powershell', '-NoProfile', '-Command', r"""
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$r = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+$b = New-Object System.Drawing.Bitmap($r.Width, $r.Height)
+$g = [System.Drawing.Graphics]::FromImage($b)
+$g.CopyFromScreen($r.Location, [System.Drawing.Point]::Empty, $r.Size)
+$b.Save((Join-Path (Get-Location) 'smoke-diagnostics/desktop.png'))
+$g.Dispose()
+$b.Dispose()
+"""], check=False, timeout=20)
     try:
         from websockets.sync.client import connect
         pages = json.load(urllib.request.urlopen('http://127.0.0.1:9222/json', timeout=5))
@@ -70,10 +109,10 @@ def diagnostics():
 
 def keys(*codes):
     for code in codes:
-        user32.keybd_event(code, 0, 0, 0)
+        send_key(code)
     time.sleep(0.1)
     for code in reversed(codes):
-        user32.keybd_event(code, 0, 2, 0)
+        send_key(code, released=True)
     time.sleep(0.2)
 
 
@@ -169,4 +208,7 @@ finally:
     if process is not None and process.poll() is None:
         process.terminate()
         process.wait(timeout=15)
+    out = Path("smoke-diagnostics")
+    out.mkdir(exist_ok=True)
+    (out / "snap.log").write_text(log(), encoding="utf-8")
     print(log(), flush=True)
