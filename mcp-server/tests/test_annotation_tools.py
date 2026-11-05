@@ -130,6 +130,33 @@ class AnnotationToolTests(unittest.TestCase):
             result = self._call("get_annotation", filename=name)
             self.assertIn("error", result.structured_content)
             self.assertEqual(self._images(result), [])
+    def test_block_symlinks_outside_inbox(self):
+        target = self.home / "private.json"
+        target.write_text(json.dumps({"secret": "sensitive"}))
+        link = self.inbox / "snap-20990104-000000-000.json"
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("Symlinks unavailable")
+        self.assertIn("error", self._call("get_annotation", filename=link.stem).structured_content)
+        self.assertEqual(self._text_json(self._call("list_annotations"))["count"], 2)
+
+    def test_block_symlinked_image(self):
+        target = self.home / "private.png"
+        target.write_bytes(self.png_bytes)
+        name = "snap-20990104-000000-000"
+        (self.inbox / (name + ".json")).write_text('{"annotations":[]}')
+        try:
+            (self.inbox / (name + ".png")).symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("Symlinks unavailable")
+        result = self._call("get_annotation", filename=name)
+        self.assertEqual(self._images(result), [])
+        self.assertIsNone(self._text_json(result)["image_path"])
+
+    def test_invalid_annotation_names(self):
+        for name in ["../../secret", "snap-../private", "snap-foo/bar", "snap-", ".last_read"]:
+            self.assertIn("error", self._call("get_annotation", filename=name).structured_content)
 
 
 if __name__ == "__main__":
