@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -46,10 +47,13 @@ def _load_annotation(json_path: Path) -> dict:
         }
 
     png_path = json_path.with_suffix(".png")
-    data["image_path"] = str(png_path) if png_path.exists() else None
+    safe_image = png_path.resolve().parent == INBOX.resolve()
+    data["image_path"] = str(png_path) if safe_image and png_path.is_file() else None
     data["filename"] = json_path.stem
 
-    if not png_path.exists():
+    if not safe_image:
+        data["warning"] = "image outside inbox blocked"
+    elif not png_path.exists():
         data["warning"] = "image file missing"
 
     return data
@@ -103,7 +107,7 @@ def _list_annotations_sorted() -> list[Path]:
     """Return all sidecar JSON files sorted newest first."""
     if not INBOX.exists():
         return []
-    return sorted(INBOX.glob("snap-*.json"), reverse=True)
+    return sorted((p for p in INBOX.glob("snap-*.json") if p.is_file() and p.resolve().parent == INBOX.resolve()), reverse=True)
 
 
 def _get_last_read() -> float:
@@ -202,9 +206,10 @@ def get_annotation(
     screenshot attached as an image content block by default.
     Example: get_annotation('snap-20260408-142300')"""
     _log(f"get_annotation called: {filename}")
+    if not isinstance(filename, str) or not re.fullmatch(r"snap-[A-Za-z0-9_-]+", filename):
+        return ToolResult(structured_content={"error": "Invalid annotation filename"})
     json_path = INBOX / f"{filename}.json"
-    # Only plain names inside the inbox; "../" or an absolute path must not reach other files.
-    if json_path.resolve().parent != INBOX.resolve() or not json_path.exists():
+    if json_path.resolve().parent != INBOX.resolve() or not json_path.is_file():
         return ToolResult(structured_content={"error": f"Annotation '{filename}' not found"})
     data = _load_annotation(json_path)
     return _annotation_result(data, [data], include_image, max_image_bytes)
