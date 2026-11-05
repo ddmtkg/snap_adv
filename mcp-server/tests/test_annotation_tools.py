@@ -5,11 +5,11 @@ import asyncio
 import base64
 import importlib
 import json
-import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastmcp import Client
 
@@ -26,18 +26,12 @@ class AnnotationToolTests(unittest.TestCase):
         self.older = self._write("snap-20990101-000000-000", self.png_bytes)
         self.newer = self._write("snap-20990102-000000-000", self.png_bytes)
 
-        self.old_home = os.environ.get("HOME")
-        os.environ["HOME"] = str(self.home)
-
-        if "server" in sys.modules:
-            del sys.modules["server"]
-        self.server = importlib.import_module("server")
-
-    def tearDown(self):
-        if self.old_home is None:
-            os.environ.pop("HOME", None)
-        else:
-            os.environ["HOME"] = self.old_home
+        # Path.home uses USERPROFILE on Windows, not HOME. Patch the API so
+        # every platform reads/writes only the isolated test directory.
+        with patch.object(Path, "home", return_value=self.home):
+            if "server" in sys.modules:
+                del sys.modules["server"]
+            self.server = importlib.import_module("server")
 
     def _write(self, stem: str, png: bytes | None) -> Path:
         base = self.inbox / stem
