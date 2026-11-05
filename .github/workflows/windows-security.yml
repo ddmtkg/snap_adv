@@ -17,6 +17,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: app/src-tauri
+          cache-on-failure: true
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -65,5 +66,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-smoke-log
-          path: ~/.snap/snap.log
+          path: |
+            ~/.snap/snap.log
+            smoke-diagnostics/*
           if-no-files-found: ignore

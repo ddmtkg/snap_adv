@@ -1,5 +1,6 @@
 """Exercise the installed release app on a disposable Windows CI desktop."""
 import ctypes
+import base64
 import json
 import os
 from pathlib import Path
@@ -7,12 +8,15 @@ import struct
 import subprocess
 import sys
 import time
+import urllib.request
 
 if sys.platform != 'win32' or os.environ.get('GITHUB_ACTIONS') != 'true':
     raise SystemExit('Run this test only on a disposable Windows GitHub Actions runner.')
 
 user32 = ctypes.windll.user32
 user32.SetProcessDPIAware()
+user32.GetForegroundWindow.restype = ctypes.c_void_p
+user32.GetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
 snap_dir = Path.home() / '.snap'
 inbox = snap_dir / 'inbox'
 log_path = snap_dir / 'snap.log'
@@ -30,7 +34,38 @@ def wait_for(predicate, label, timeout=60):
         if predicate():
             return
         time.sleep(0.2)
+    diagnostics()
     raise AssertionError(f'Timed out: {label}\n{log()}')
+
+
+def diagnostics():
+    """Inspect only this test app's renderer; debugging is enabled only in CI."""
+    out = Path('smoke-diagnostics')
+    out.mkdir(exist_ok=True)
+    title = ctypes.create_unicode_buffer(512)
+    user32.GetWindowTextW(user32.GetForegroundWindow(), title, len(title))
+    print(f'Foreground window: {title.value}', flush=True)
+    try:
+        from websockets.sync.client import connect
+        pages = json.load(urllib.request.urlopen('http://127.0.0.1:9222/json', timeout=5))
+        page = next(p for p in pages if 'tauri.localhost' in p.get('url', ''))
+        with connect(page['webSocketDebuggerUrl']) as ws:
+            for number, method, params in [
+                (1, 'Runtime.evaluate', {'expression': "JSON.stringify({active:document.activeElement?.outerHTML,input:document.querySelector('#text-input')?.outerHTML,toolbar:document.querySelector('#toolbar')?.outerHTML,focus:document.hasFocus(),atPoint:document.elementFromPoint(200,340)?.tagName})", 'returnByValue': True}),
+                (2, 'Page.captureScreenshot', {}),
+            ]:
+                ws.send(json.dumps({'id': number, 'method': method, 'params': params}))
+                while True:
+                    result = json.loads(ws.recv(timeout=10))
+                    if result.get('id') == number:
+                        break
+                if number == 1:
+                    (out / 'renderer.json').write_text(json.dumps(result), encoding='utf-8')
+                    print(json.dumps(result), flush=True)
+                elif 'data' in result.get('result', {}):
+                    (out / 'overlay.png').write_bytes(base64.b64decode(result['result']['data']))
+    except Exception as exc:
+        print(f'Renderer diagnostics unavailable: {exc}', flush=True)
 
 
 def keys(*codes):
@@ -93,7 +128,8 @@ try:
     executable = install_dir / 'snap.exe'
     assert executable.is_file(), f'Installer did not create {executable}'
     print('PASS: NSIS installation', flush=True)
-    process = subprocess.Popen([str(executable)])
+    test_env = dict(os.environ, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9222')
+    process = subprocess.Popen([str(executable)], env=test_env)
     wait_for(lambda: 'snap ready' in log(), 'tray startup')
     assert process.poll() is None, 'Tray process exited unexpectedly'
     print('PASS: tray startup and hotkey registration', flush=True)
