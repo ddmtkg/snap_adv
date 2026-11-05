@@ -116,6 +116,24 @@ class AnnotationToolTests(unittest.TestCase):
         result = self._call("get_annotation", filename="snap-nope")
         self.assertIn("error", result.structured_content)
 
+    def test_unicode_comment(self):
+        comment = "Проверить размер — замечание №1"
+        self.newer.with_suffix(".json").write_text(
+            json.dumps({"annotations": [{"type": "text", "content": comment}]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        result = self._call("get_latest_annotation")
+        self.assertEqual(self._text_json(result)["annotations"][0]["content"], comment)
+
+    def test_malformed_metadata_does_not_break_inbox(self):
+        for invalid in (b"[]", b"null", b"{broken", b"\xff"):
+            self.newer.with_suffix(".json").write_bytes(invalid)
+            result = self._call("list_annotations")
+            data = self._text_json(result)
+            self.assertEqual(data["count"], 2)
+            self.assertIn("error", data["annotations"][0])
+            self.assertEqual(data["annotations"][1]["filename"], self.older.name)
+
     def test_get_annotation_rejects_paths_outside_inbox(self):
         outside = self.home / "secret"
         outside.with_suffix(".json").write_text(json.dumps({"annotations": []}))

@@ -37,9 +37,11 @@ def _log(msg: str):
 def _load_annotation(json_path: Path) -> dict:
     """Load a sidecar JSON and attach the image path."""
     try:
-        with open(json_path) as f:
+        with open(json_path, encoding="utf-8") as f:
             data = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
+        if not isinstance(data, dict):
+            raise ValueError("annotation metadata must be a JSON object")
+    except (ValueError, OSError) as e:
         return {
             "filename": json_path.stem,
             "error": f"corrupt or unreadable: {e}",
