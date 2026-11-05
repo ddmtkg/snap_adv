@@ -9,6 +9,9 @@ use std::sync::Mutex;
 pub static OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static PRE_CAPTURED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(target_os = "windows")]
+static WINDOWS_CAPTURE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+
 // ----- Capture file path -----
 
 fn capture_temp_path() -> PathBuf {
@@ -46,14 +49,12 @@ pub fn capture_screen_interactive() -> Result<(), String> {
 
 #[tauri::command]
 fn capture_screen() -> Result<String, String> {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     let path = capture_temp_path();
 
     #[cfg(target_os = "windows")]
     {
         use screenshots::Screen;
-
-        let _ = fs::remove_file(&path);
 
         let screens = Screen::all().map_err(|e| format!("Failed to list screens: {}", e))?;
 
@@ -67,17 +68,17 @@ fn capture_screen() -> Result<String, String> {
             .capture()
             .map_err(|e| format!("Screen capture failed: {}", e))?;
 
-        image
-            .save(&path)
-            .map_err(|e| format!("Failed to save capture: {}", e))?;
-
-        match fs::metadata(&path) {
-            Ok(meta) if meta.len() > 0 => {
-                log_event("screen captured via screenshots crate");
-                return Ok(path.to_string_lossy().to_string());
-            }
-            _ => return Err("Screen capture produced empty file".to_string()),
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, image.width(), image.height());
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+            writer.write_image_data(image.as_raw()).map_err(|e| e.to_string())?;
         }
+        *WINDOWS_CAPTURE.lock().map_err(|_| "capture lock poisoned")? = Some(bytes);
+        log_event("screen captured to memory");
+        return Ok("memory://capture".to_string());
     }
 
     #[cfg(target_os = "macos")]
@@ -681,13 +682,21 @@ fn save_annotation(metadata_json: String, image_base64: Option<String>) -> Resul
             .map_err(|e| format!("Base64 decode failed: {}", e))?;
         fs::write(&png_path, &image_bytes).map_err(|e| format!("Failed to write PNG: {}", e))?;
     } else {
-        // Copy the raw screen capture — much faster, no IPC overhead
-        let capture = capture_temp_path();
-        if capture.exists() {
-            fs::copy(&capture, &png_path)
-                .map_err(|e| format!("Failed to copy capture: {}", e))?;
-        } else {
-            return Err("No capture file found".to_string());
+        #[cfg(target_os = "windows")]
+        {
+            let guard = WINDOWS_CAPTURE.lock().map_err(|_| "capture lock poisoned")?;
+            let bytes = guard.as_ref().ok_or("No screen capture")?;
+            fs::write(&png_path, bytes).map_err(|e| e.to_string())?;
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let capture = capture_temp_path();
+            if capture.exists() {
+                fs::copy(&capture, &png_path)
+                    .map_err(|e| format!("Failed to copy capture: {}", e))?;
+            } else {
+                return Err("No capture file found".to_string());
+            }
         }
     }
 
@@ -703,6 +712,7 @@ fn save_annotation(metadata_json: String, image_base64: Option<String>) -> Resul
     fs::write(&json_path, &metadata_str)
         .map_err(|e| format!("Failed to write metadata: {}", e))?;
 
+    clear_capture();
     log_event(&format!("Saved annotation: {}", png_name));
 
     Ok(png_path.to_string_lossy().to_string())
@@ -712,15 +722,24 @@ fn save_annotation(metadata_json: String, image_base64: Option<String>) -> Resul
 
 #[tauri::command]
 fn read_capture_base64() -> Result<String, String> {
-    let path = capture_temp_path();
-    let bytes = fs::read(&path).map_err(|e| format!("Failed to read capture: {}", e))?;
-    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+    #[cfg(target_os = "windows")]
+    {
+        let guard = WINDOWS_CAPTURE.lock().map_err(|_| "capture lock poisoned")?;
+        let bytes = guard.as_ref().ok_or("No screen capture")?;
+        return Ok(base64::engine::general_purpose::STANDARD.encode(bytes));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let bytes = fs::read(capture_temp_path()).map_err(|e| e.to_string())?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+    }
 }
 
 // ----- Overlay lifecycle -----
 
 #[tauri::command]
 fn mark_overlay_closed() {
+    clear_capture();
     OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
     log_event("overlay closed");
 }
@@ -730,6 +749,13 @@ fn mark_overlay_closed() {
 #[tauri::command]
 fn frontend_log(msg: String) {
     log_event(&format!("[ui] {}", msg));
+}
+
+fn clear_capture() {
+    #[cfg(target_os = "windows")]
+    if let Ok(mut guard) = WINDOWS_CAPTURE.lock() { guard.take(); }
+    #[cfg(not(target_os = "windows"))]
+    { let _ = fs::remove_file(capture_temp_path()); }
 }
 
 // ----- Helpers -----
